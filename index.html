@@ -9,6 +9,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,560;9..144,680&family=Public+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 
@@ -199,6 +200,15 @@
   .toast{position:fixed; bottom:18px; left:50%; transform:translateX(-50%) translateY(8px); z-index:700; background:var(--ink); color:var(--bg); font-size:12.5px; padding:9px 16px; border-radius:999px; opacity:0; pointer-events:none; transition:opacity .18s, transform .18s;}
   .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
 
+  .badge.sinub{color:var(--pend); border-color:var(--pend);}
+  .importmodal{position:fixed; inset:0; background:rgba(10,16,14,.45); z-index:800; display:none; align-items:center; justify-content:center; padding:16px;}
+  .importmodal.open{display:flex;}
+  .importcard{background:var(--surface); border:1px solid var(--line); border-radius:var(--radius-m); box-shadow:var(--shadow); padding:20px 22px; width:min(440px,100%);}
+  .importcard h3{font-size:16px; margin-bottom:8px;}
+  .importcard p{font-size:12.5px; color:var(--ink-soft); line-height:1.55; margin:0 0 12px;}
+  .progbar{height:8px; border-radius:4px; background:var(--surface-2); overflow:hidden; margin-bottom:10px;}
+  .progbar i{display:block; height:100%; width:0; background:var(--accent); transition:width .2s;}
+  .importcard .row{display:flex; gap:8px; justify-content:flex-end; margin-top:6px;}
   @media (max-width:480px){ .brand span{display:none;} .drawer{width:100%;} }
 </style>
 </head>
@@ -215,6 +225,8 @@
       <button id="btnExport" title="Descargar una copia de respaldo (.json)">Exportar copia</button>
       <button id="btnImport" title="Restaurar desde una copia (.json) — reemplaza los datos de todos">Importar copia</button>
       <input type="file" id="fileImport" accept="application/json" style="display:none;">
+      <button id="btnClientes" title="Cargar clientes desde el Excel (.xlsx) y ubicarlos en el mapa">Importar clientes</button>
+      <input type="file" id="fileClientes" accept=".xlsx,.xls" style="display:none;">
     </div>
     <div class="modebar" id="modebar">
       <button data-mode="ver" class="active">Ver mapa</button>
@@ -243,6 +255,7 @@
           <button class="chip" data-val="atendido">Atendidos</button>
           <button class="chip" data-val="pendiente">Pendientes</button>
           <button class="chip" data-val="prospecto">Prospectos</button>
+          <button class="chip" data-val="sinubicar">Sin ubicar</button>
         </div>
       </div>
       <div class="panel-section grow">
@@ -298,6 +311,18 @@
 </div>
 
 <div class="toast" id="toast"></div>
+
+<div class="importmodal" id="importModal">
+  <div class="importcard">
+    <h3 id="importTitle">Importando clientes</h3>
+    <p id="importMsg">Preparando…</p>
+    <div class="progbar"><i id="importBar"></i></div>
+    <div class="row">
+      <button class="btn" id="importCancel">Detener y guardar lo avanzado</button>
+      <button class="btn primary" id="importDone" style="display:none;">Cerrar</button>
+    </div>
+  </div>
+</div>
 
 <script>
 (function(){
@@ -520,6 +545,7 @@
   function renderMarkers(){
     markersLayer.clearLayers();
     state.negocios.forEach(function(n){
+      if(n.lat==null || n.lng==null) return; // clientes sin ubicar: solo aparecen en la lista
       var selected = state.selected && state.selected.type==='negocio' && state.selected.id===n.id;
       var visible = matchesFilters(n);
       var m = L.circleMarker([n.lat,n.lng], {
@@ -564,7 +590,11 @@
 
   function onMapClick(e){
     var latlng = {lat:e.latlng.lat, lng:e.latlng.lng};
-    if(state.mode==='agregar'){
+    if(state.mode==='ubicar' && state.locateId){
+      var lid = state.locateId; state.locateId = null;
+      updateNegocio(lid, {lat:latlng.lat, lng:latlng.lng, geo:'manual'});
+      setMode('ver'); showToast('Ubicación guardada');
+    } else if(state.mode==='agregar'){
       openNegocioDrawer(null, latlng);
     } else if(state.mode==='ruta'){
       state.routePoints.push(latlng);
@@ -577,10 +607,11 @@
 
   function filteredNegociosVisible(){ return state.negocios; }
   function matchesFilters(n){
-    if(state.filterEstado!=='todos' && n.estado!==state.filterEstado) return false;
+    if(state.filterEstado==='sinubicar'){ if(n.lat!=null) return false; }
+    else if(state.filterEstado!=='todos' && n.estado!==state.filterEstado) return false;
     if(state.query){
       var q = state.query.toLowerCase();
-      var hay = ((n.nombre||'')+' '+(n.sector||'')+' '+(n.calle||'')+' '+(n.notas||'')).toLowerCase();
+      var hay = ((n.nombre||'')+' '+(n.sector||'')+' '+(n.zona||'')+' '+(n.ciudad||'')+' '+(n.calle||'')+' '+(n.notas||'')).toLowerCase();
       if(hay.indexOf(q)===-1) return false;
     }
     return true;
@@ -604,9 +635,11 @@
         row.className='item'; if(state.selected && state.selected.type==='negocio' && state.selected.id===n.id) row.setAttribute('data-selected','1');
         row.innerHTML = '<span class="dot" style="background:'+estadoColor(n.estado)+'"></span><div class="meta"><div class="name"></div><div class="sub"></div></div><span class="badge"></span>';
         row.querySelector('.name').textContent = n.nombre || '(sin nombre)';
-        row.querySelector('.sub').textContent = (n.sector||'—') + (n.calle?(' · '+n.calle):'') + ' · ' + (n.canal||'—');
-        row.querySelector('.badge').textContent = n.vendedor || '';
-        row.addEventListener('click', function(){ selectItem('negocio', n.id); if(map) map.panTo([n.lat,n.lng]); });
+        row.querySelector('.sub').textContent = (n.sector||n.zona||n.ciudad||'—') + (n.calle?(' · '+n.calle):'') + (n.canal?(' · '+n.canal):'');
+        var badge = row.querySelector('.badge');
+        if(n.lat==null){ badge.textContent = 'sin ubicar'; badge.classList.add('sinub'); }
+        else { badge.textContent = n.vendedor || ''; }
+        row.addEventListener('click', function(){ selectItem('negocio', n.id); if(map && n.lat!=null) map.panTo([n.lat,n.lng]); });
         el.list.appendChild(row);
       });
     }
@@ -656,7 +689,8 @@
   var HINTS = {
     ver: 'Haz clic en un negocio o ruta del mapa para ver sus detalles.',
     agregar: 'Haz clic en el mapa donde está ubicado el negocio para registrarlo.',
-    ruta: 'Haz clic para ir trazando el recorrido; termina desde la barra inferior.'
+    ruta: 'Haz clic para ir trazando el recorrido; termina desde la barra inferior.',
+    ubicar: 'Haz clic en el mapa donde está este cliente (Esc para cancelar).'
   };
   document.getElementById('modebar').addEventListener('click', function(ev){
     var btn = ev.target.closest('button[data-mode]'); if(!btn) return;
@@ -712,10 +746,13 @@
 
   async function openNegocioDrawer(existing, clickLatLng){
     var isNew = !existing;
-    var loc = clickLatLng || (existing ? {lat:existing.lat, lng:existing.lng} : {lat:LOJA_CENTER[0], lng:LOJA_CENTER[1]});
+    var loc = clickLatLng || (existing ? {lat:(existing.lat==null?null:existing.lat), lng:(existing.lng==null?null:existing.lng)} : {lat:LOJA_CENTER[0], lng:LOJA_CENTER[1]});
     var draft = existing ? Object.assign({}, existing) : {
       nombre:'', sector:'', canal:'HORECA', estado:'pendiente', vendedor:'Edgar', notas:'', calle:'', lat:loc.lat, lng:loc.lng
     };
+    if(draft.canal===undefined || draft.canal===null) draft.canal = '';
+    var coordTxt = loc.lat==null ? 'Sin ubicación en el mapa todavía'
+      : (loc.lat.toFixed(5)+', '+loc.lng.toFixed(5)+(existing && existing.geo==='auto' ? ' · ubicación automática, verifícala' : ''));
     openDrawer(isNew ? 'Nuevo negocio' : 'Editar negocio');
     el.drawerBody.innerHTML =
       '<div class="field"><label>Nombre del negocio</label><input type="text" id="fNombre" /></div>'+
@@ -729,7 +766,8 @@
       '<div class="field"><label>Calle / dirección</label><input type="text" id="fCalle" placeholder="Ej. Av. Pío Jaramillo Alvarado y Rocafuerte" /><div class="geo-note" id="geoNote"></div></div>'+
       '<div class="field"><label>Vendedor</label><select id="fVendedor"></select></div>'+
       '<div class="field"><label>Notas</label><textarea id="fNotas" placeholder="Horario, contacto, pedido típico…"></textarea></div>'+
-      '<div class="coord-note">'+loc.lat.toFixed(5)+', '+loc.lng.toFixed(5)+'</div>';
+      (existing && existing.ultimaCompra ? '<div class="coord-note">Última compra: '+escapeHtml(String(existing.ultimaCompra).slice(0,10))+(existing.zona?' · '+escapeHtml(existing.zona):'')+'</div>' : '')+
+      '<div class="coord-note">'+coordTxt+'</div>';
 
     document.getElementById('fNombre').value = draft.nombre;
     document.getElementById('fCalle').value = draft.calle;
@@ -742,6 +780,7 @@
 
     var selCanal = document.getElementById('fCanal');
     CANALES.forEach(function(c){ var o=document.createElement('option'); o.value=c; o.textContent=c; selCanal.appendChild(o); });
+    var blankCanal=document.createElement('option'); blankCanal.value=''; blankCanal.textContent='— sin definir —'; selCanal.insertBefore(blankCanal, selCanal.firstChild);
     selCanal.value = draft.canal;
 
     var selVend = document.getElementById('fVendedor');
@@ -755,7 +794,7 @@
 
     el.drawerFoot.innerHTML = isNew
       ? '<button class="btn primary" id="fSave" style="flex:1;">Guardar negocio</button>'
-      : '<button class="btn ghost" id="fDelete">Eliminar</button><button class="btn primary" id="fSave" style="flex:1;">Guardar cambios</button>';
+      : '<button class="btn ghost" id="fDelete">Eliminar</button><button class="btn" id="fMove">'+(loc.lat==null?'Ubicar en el mapa':'Mover en el mapa')+'</button><button class="btn primary" id="fSave" style="flex:1;">Guardar cambios</button>';
 
     document.getElementById('fSave').addEventListener('click', function(){
       var nombre = document.getElementById('fNombre').value.trim();
@@ -773,6 +812,17 @@
       closeDrawer(); render();
     });
     if(!isNew){
+      document.getElementById('fMove').addEventListener('click', function(){
+        // guarda lo editado y pasa a modo "ubicar": el siguiente clic en el mapa fija la posición
+        var nombreMv = document.getElementById('fNombre').value.trim() || existing.nombre;
+        updateNegocio(existing.id, {
+          nombre:nombreMv, sector:selSector.value, canal:selCanal.value,
+          calle:document.getElementById('fCalle').value.trim(), vendedor:selVend.value,
+          estado:draft.estado, notas:document.getElementById('fNotas').value.trim()
+        });
+        state.selected=null; closeDrawer(); render();
+        state.locateId = existing.id; setMode('ubicar');
+      });
       document.getElementById('fDelete').addEventListener('click', function(){
         if(confirm('¿Eliminar "'+existing.nombre+'"?')){ deleteNegocio(existing.id); state.selected=null; closeDrawer(); render(); }
       });
@@ -825,6 +875,181 @@
     });
   }
 
+  /* ============ importar clientes desde Excel ============ */
+  // Del Excel solo se guardan: nombre comercial (o razón social si falta), dirección, zona,
+  // vendedor y fecha de última compra. NO se suben RUC/cédula, correos ni montos.
+  var CIUDADES = ['VILCABAMBA','YANTZAZA','ZAMORA','CARIAMANGA','CATAMAYO','CELICA','MACARA','ALAMOR','MALACATOS','GONZANAMA','ZUMBI','CUMBARATZA','PALANDA','GUAYZIMI','GUAIZIMI','PANGUI','CALVAS','SARAGURO','PINDAL','ZAPOTILLO','CATACOCHA','PUYANGO','QUILANGA','AMALUZA','PAQUISHA','EL PANGUI','SOZORANGA'];
+  var CIUDAD_FIX = {'GUAIZIMI':'Guayzimi','GUAYZIMI':'Guayzimi','MACARA':'Macará','GONZANAMA':'Gonzanamá'};
+  var NO_APROX = ['country','state','region','province','state_district','county','municipality','city','town','village','hamlet','district','borough','postcode','isolated_dwelling'];
+  var importCancel = false;
+
+  function normTxt(s){ return String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase().replace(/\s+/g,' ').trim(); }
+  function cap(s){ return s.toLowerCase().replace(/(^|\s)\S/g, function(c){return c.toUpperCase();}); }
+
+  function detectCiudad(dirNorm){
+    // "Zamora Huayco", "Orillas del Zamora", etc. son barrios/calles de Loja, no la ciudad de Zamora
+    var t = dirNorm.replace(/ZAMORA HUAYCO|ORILLAS DEL ZAMORA|RIO ZAMORA|NANGARITZA|AV\.?\s*CATAMAYO|AVENIDA\s+CATAMAYO/g,' ');
+    for(var i=0;i<CIUDADES.length;i++){ if(t.indexOf(CIUDADES[i])!==-1) return CIUDAD_FIX[CIUDADES[i]] || cap(CIUDADES[i]); }
+    return 'Loja';
+  }
+  // Devuelve hasta 2 consultas para el buscador, de más a menos específica
+  function buildQueries(dir){
+    var d = normTxt(dir);
+    var ciudad = detectCiudad(d);
+    var c = d.replace(/\([^)]*\)/g,' ');
+    c = c.split(/\b(JUNTO|DIAG|DIAGONAL|FRENTE|FTE|CERCA|ATRAS|A POCOS|ESQUINA|ESQ|AL LADO|FUERA DEL)\b/)[0];
+    c = c.replace(/\bS\s?[\/\-]\s?N\b|\bSN\b|\bS N\b/g,' ');          // s/n, s-n, sn
+    c = c.replace(/\b\d+\s*[-–]\s*\d+\b/g,' ');                        // numeración 190-16
+    c = c.replace(/\bINTERSECCION\b/g,' Y ');
+    c = c.replace(/\bAV\b\.?/g,'AVENIDA ');
+    c = c.replace(/AVENIDA\s+CATAMAYO/g,'AVENIDACATAMAYO').replace(/ZAMORA HUAYCO/g,'ZAMORAHUAYCO').replace(/ORILLAS DEL ZAMORA/g,'ORILLASDELZAMORA').replace(/RIO ZAMORA/g,'RIOZAMORA');
+    c = c.replace(/[\/:;,\-–.]+/g,' , ');
+    CIUDADES.concat(['LOJA','URB','URBANIZACION']).forEach(function(w){ c = c.replace(new RegExp('\\b'+w+'\\b','g'),' '); });
+    c = c.replace(/AVENIDACATAMAYO/g,'AVENIDA CATAMAYO').replace(/ZAMORAHUAYCO/g,'ZAMORA HUAYCO').replace(/ORILLASDELZAMORA/g,'ORILLAS DEL ZAMORA').replace(/RIOZAMORA/g,'RIO ZAMORA');
+    c = c.replace(/\s*,\s*(,\s*)*/g,', ').replace(/\s+/g,' ').replace(/^[ ,]+|[ ,]+$/g,'');
+    c = c.replace(/^(Y|E|ENTRE)\s+/,'').replace(/\s+(Y|E|ENTRE)$/,'');
+    if(c.length < 4) return {ciudad:ciudad, queries:[]};
+    var qs = [c+', '+ciudad+', Ecuador'];
+    var partes = c.split(/\s+(?:Y|E|ENTRE)\s+/);
+    if(partes.length>1 && partes[0].length>=4) qs.push(partes[0].replace(/[ ,]+$/,'')+', '+ciudad+', Ecuador');
+    return {ciudad:ciudad, queries:qs};
+  }
+
+  function sleep(ms){ return new Promise(function(r){ setTimeout(r, ms); }); }
+
+  async function geocodeSearch(q){
+    var url = 'https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=1&countrycodes=ec&bounded=1&viewbox=-80.5,-3.2,-78.5,-5.1&q='+encodeURIComponent(q);
+    for(var intento=0; intento<2; intento++){
+      try{
+        var res = await fetch(url, {headers:{'Accept':'application/json'}});
+        if(res.status===429){ await sleep(5000); continue; }
+        if(!res.ok) return null;
+        var arr = await res.json();
+        if(!arr.length) return null;
+        var r = arr[0];
+        var tipo = r.addresstype || r.type || '';
+        if(NO_APROX.indexOf(tipo)!==-1) return null; // coincidencia a nivel ciudad: no sirve para ubicar un cliente
+        var a = r.address || {};
+        return {lat:parseFloat(r.lat), lng:parseFloat(r.lon), sectorGuess:(a.suburb||a.neighbourhood||a.quarter||a.city_district||'')};
+      }catch(e){ await sleep(1500); }
+    }
+    return null;
+  }
+
+  function mapVendedor(v){
+    var n = normTxt(v);
+    if(n.indexOf('HIDALGO')!==-1 || n.indexOf('JUAN CARLOS')!==-1) return 'JC';
+    if(n.indexOf('PABLO')!==-1) return 'Pablo';
+    if(n.indexOf('EDGAR')!==-1) return 'Edgar';
+    return 'Otro';
+  }
+  function fechaISO(v){
+    if(!v) return '';
+    if(v instanceof Date && !isNaN(v)) return v.toISOString().slice(0,10);
+    var s = String(v); var m = s.match(/^(\d{4})-(\d{2})-(\d{2})/); return m ? m[0] : '';
+  }
+
+  function leerClientes(buf){
+    var wb = XLSX.read(buf, {type:'array', cellDates:true});
+    var ws = wb.Sheets['Clientes'] || wb.Sheets[wb.SheetNames[0]];
+    var rows = XLSX.utils.sheet_to_json(ws, {defval:''});
+    var hoy = new Date();
+    var out = [];
+    rows.forEach(function(r){
+      var comercial = String(r['Nombre comercial']||'').trim();
+      var razon = String(r['Razón social / Cliente']||r['Razon social / Cliente']||'').trim();
+      var nombre = comercial || razon;
+      if(!nombre) return;
+      var ult = fechaISO(r['Última compra']||r['Ultima compra']);
+      var dias = ult ? Math.round((hoy - new Date(ult))/86400000) : 9999;
+      out.push({
+        nombre: nombre,
+        calle: String(r['Dirección']||r['Direccion']||'').trim(),
+        zona: String(r['Zona']||'').trim(),
+        vendedor: mapVendedor(r['Vendedor']),
+        ultimaCompra: ult,
+        estado: dias<=90 ? 'atendido' : 'pendiente',
+        canal: '',
+        notas: comercial ? '' : 'Sin nombre comercial en el sistema (se muestra la razón social).',
+        claveImport: normTxt(razon||comercial),
+        origen: 'excel-clientes'
+      });
+    });
+    return out;
+  }
+
+  var modal = { el:document.getElementById('importModal'), title:document.getElementById('importTitle'), msg:document.getElementById('importMsg'),
+                bar:document.getElementById('importBar'), cancel:document.getElementById('importCancel'), done:document.getElementById('importDone') };
+  modal.cancel.addEventListener('click', function(){ importCancel = true; modal.msg.textContent = 'Deteniendo… guardando lo que se alcanzó a ubicar.'; });
+  modal.done.addEventListener('click', function(){ modal.el.classList.remove('open'); });
+
+  async function importarClientes(file){
+    if(!db){ showToast('Aún no hay conexión a la nube'); return; }
+    var buf = await file.arrayBuffer();
+    var clientes;
+    try{ clientes = leerClientes(buf); }catch(e){ showToast('No se pudo leer el Excel'); return; }
+    var existentes = {};
+    state.negocios.forEach(function(n){ if(n.claveImport) existentes[n.claveImport] = true; });
+    var nuevos = clientes.filter(function(c){ return !existentes[c.claveImport]; });
+    if(!nuevos.length){ showToast('Todos los clientes del Excel ya estaban importados'); return; }
+    var conDir = nuevos.filter(function(c){ return c.calle; }).length;
+    var minutos = Math.max(1, Math.round(conDir*1.6/60));
+    if(!confirm('Se importarán '+nuevos.length+' clientes ('+(clientes.length-nuevos.length)+' ya existían).\n\n'+conDir+' tienen dirección y se intentarán ubicar solos en el mapa (unos '+minutos+' min). Los '+(nuevos.length-conDir)+' sin dirección quedan en "Sin ubicar" para colocarlos con un clic.\n\nNo cierres esta página mientras importa. ¿Continuar?')) return;
+
+    importCancel = false;
+    modal.title.textContent = 'Importando clientes';
+    modal.cancel.style.display = ''; modal.done.style.display = 'none';
+    modal.bar.style.width = '0%'; modal.el.classList.add('open');
+
+    var usados = {};           // evita que dos clientes queden exactamente en el mismo punto
+    var ubicados = 0, sinUbicar = 0, guardados = 0, lote = [];
+    async function volcar(){
+      if(!lote.length) return;
+      var batch = db.batch();
+      lote.forEach(function(c){ batch.set(negociosCol.doc(), c); });
+      await batch.commit(); guardados += lote.length; lote = [];
+    }
+
+    for(var i=0;i<nuevos.length;i++){
+      var c = nuevos[i];
+      c.lat = null; c.lng = null; c.creadoEn = new Date().toISOString();
+      var info = c.calle ? buildQueries(c.calle) : {ciudad:'', queries:[]};
+      c.ciudad = info.ciudad || '';
+      if(!importCancel && info.queries.length){
+        modal.msg.textContent = 'Ubicando '+(i+1)+' de '+nuevos.length+': '+c.nombre;
+        var hit = null;
+        for(var k=0;k<info.queries.length && !hit && !importCancel;k++){
+          hit = await geocodeSearch(info.queries[k]);
+          await sleep(1100); // límite de uso de Nominatim: 1 consulta por segundo
+        }
+        if(hit){
+          var key = hit.lat.toFixed(5)+','+hit.lng.toFixed(5);
+          var n = usados[key] || 0; usados[key] = n+1;
+          if(n){ var ang = n*2.4; c.lat = hit.lat + 0.00016*n*Math.sin(ang); c.lng = hit.lng + 0.00016*n*Math.cos(ang); }
+          else { c.lat = hit.lat; c.lng = hit.lng; }
+          c.geo = 'auto';
+          if(info.ciudad==='Loja'){ var ms = matchSector(hit.sectorGuess); if(ms) c.sector = ms; }
+          ubicados++;
+        }
+      }
+      if(c.lat==null) sinUbicar++;
+      lote.push(c);
+      if(lote.length>=25) await volcar();
+      modal.bar.style.width = Math.round((i+1)/nuevos.length*100)+'%';
+    }
+    await volcar();
+    modal.title.textContent = importCancel ? 'Importación detenida' : 'Importación terminada';
+    modal.msg.textContent = guardados+' clientes guardados: '+ubicados+' ubicados automáticamente en el mapa y '+sinUbicar+' en "Sin ubicar". Revisa los puntos automáticos (la ubicación sale de la calle, no del local exacto) y usa el filtro "Sin ubicar" para colocar el resto con un clic.';
+    modal.cancel.style.display = 'none'; modal.done.style.display = '';
+  }
+
+  document.getElementById('btnClientes').addEventListener('click', function(){ document.getElementById('fileClientes').click(); });
+  document.getElementById('fileClientes').addEventListener('change', function(ev){
+    var f = ev.target.files && ev.target.files[0]; if(!f) return;
+    importarClientes(f).catch(function(){ showToast('Falló la importación — revisa tu conexión'); modal.el.classList.remove('open'); });
+    ev.target.value = '';
+  });
+
   /* ============ onboarding ============ */
   var onboardEl = document.getElementById('onboard');
   try{ if(localStorage.getItem('cobertura-loja-onboard-dismissed-v3')==='1') onboardEl.style.display='none'; }catch(e){}
@@ -842,6 +1067,7 @@
   window.addEventListener('keydown', function(ev){
     if(ev.key==='Escape'){
       if(el.drawer.classList.contains('open')){ state.selected=null; closeDrawer(); render(); }
+      else if(state.mode==='ubicar'){ state.locateId=null; setMode('ver'); }
       else if(state.mode==='ruta' && state.routePoints.length){ state.routePoints=[]; updateRouteToolbar(); renderTempRoute(); }
     }
   });
