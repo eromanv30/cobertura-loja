@@ -200,6 +200,18 @@
   .toast{position:fixed; bottom:18px; left:50%; transform:translateX(-50%) translateY(8px); z-index:700; background:var(--ink); color:var(--bg); font-size:12.5px; padding:9px 16px; border-radius:999px; opacity:0; pointer-events:none; transition:opacity .18s, transform .18s;}
   .toast.show{opacity:1; transform:translateX(-50%) translateY(0);}
 
+  .userbox{display:flex; align-items:center; gap:8px; font-family:var(--font-mono); font-size:11px; color:var(--ink-faint);}
+  .userbox button{border:1px solid var(--line); background:var(--surface); color:var(--ink-soft); font-size:11px; font-weight:600; padding:4px 9px; border-radius:var(--radius-s); cursor:pointer;}
+  .login-overlay{position:fixed; inset:0; z-index:1000; background:var(--bg); display:none; align-items:center; justify-content:center; padding:16px;}
+  .login-overlay.open{display:flex;}
+  .login-card{background:var(--surface); border:1px solid var(--line); border-radius:var(--radius-l); box-shadow:var(--shadow); padding:26px 26px 22px; width:min(380px,100%); display:flex; flex-direction:column; gap:8px;}
+  .login-card h2{font-size:24px; margin-bottom:2px;}
+  .login-card p{font-size:13px; color:var(--ink-soft); line-height:1.5; margin:0 0 8px;}
+  .login-card label{font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--ink-faint); margin-top:4px;}
+  .login-card input{border:1px solid var(--line); border-radius:var(--radius-s); padding:10px 11px; font-size:14px; background:var(--bg); color:var(--ink); font-family:inherit; width:100%;}
+  .login-card .btn{margin-top:10px; padding:10px 13px; font-size:14px;}
+  .linkbtn{border:none; background:none; color:var(--accent); font-size:12.5px; font-weight:600; cursor:pointer; padding:6px 0; text-align:left;}
+  .login-msg{font-size:12.5px; color:var(--pend); min-height:18px; line-height:1.45;}
   .badge.sinub{color:var(--pend); border-color:var(--pend);}
   .importmodal{position:fixed; inset:0; background:rgba(10,16,14,.45); z-index:800; display:none; align-items:center; justify-content:center; padding:16px;}
   .importmodal.open{display:flex;}
@@ -214,6 +226,20 @@
 </head>
 <body>
 
+<div class="login-overlay open" id="loginOverlay">
+  <form class="login-card" id="loginForm" autocomplete="on">
+    <h2>Cobertura Loja</h2>
+    <p>Acceso solo para el equipo de Esturión. Entra con tu correo y contraseña.</p>
+    <label for="loginEmail">Correo</label>
+    <input type="email" id="loginEmail" autocomplete="username" inputmode="email" required>
+    <label for="loginPass">Contraseña</label>
+    <input type="password" id="loginPass" autocomplete="current-password" required>
+    <button type="submit" class="btn primary" id="loginBtn">Entrar</button>
+    <button type="button" class="linkbtn" id="loginReset">Olvidé mi contraseña</button>
+    <div class="login-msg" id="loginMsg" role="status"></div>
+  </form>
+</div>
+
 <div class="app" id="app">
   <header class="topbar">
     <div class="brand">
@@ -221,6 +247,7 @@
       <span>Esturión &middot; mapa real, compartido en la nube</span>
     </div>
     <div class="dbstate" id="dbstate"><span class="dot"></span><span id="dbstateLabel">conectando…</span></div>
+    <div class="userbox" id="userBox" style="display:none;"><span id="userEmail"></span><button id="btnSalir" title="Cerrar sesión">Salir</button></div>
     <div class="iobtns">
       <button id="btnExport" title="Descargar una copia de respaldo (.json)">Exportar copia</button>
       <button id="btnImport" title="Restaurar desde una copia (.json) — reemplaza los datos de todos">Importar copia</button>
@@ -381,7 +408,9 @@
     drawerFoot: document.getElementById('drawerFoot'),
     toast: document.getElementById('toast'),
     dbstate: document.getElementById('dbstate'),
-    dbstateLabel: document.getElementById('dbstateLabel')
+    dbstateLabel: document.getElementById('dbstateLabel'),
+    userBox: document.getElementById('userBox'),
+    userEmail: document.getElementById('userEmail')
   };
 
   function showToast(msg){
@@ -405,6 +434,8 @@
     return FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.apiKey.indexOf('PEGA_AQUI')===-1;
   }
 
+  var pendingLoginMsg = '';
+
   function initFirebase(){
     if(!firebaseConfigLooksReal()){
       el.dbstateLabel.textContent = 'falta configurar Firebase (ver guía)';
@@ -418,15 +449,14 @@
       negociosCol = db.collection('negocios');
       rutasCol = db.collection('rutas');
       auth.onAuthStateChanged(function(user){
-        if(user){
-          el.dbstateLabel.textContent = 'sincronizado con todos';
-          el.dbstate.classList.remove('offline');
+        if(user && !user.isAnonymous && user.email){
+          showApp(user);
           subscribeData();
+        } else {
+          if(user && user.isAnonymous){ auth.signOut(); } // sesiones anónimas de la versión anterior ya no sirven
+          stopData();
+          showLogin(pendingLoginMsg); pendingLoginMsg = '';
         }
-      });
-      auth.signInAnonymously().catch(function(e){
-        el.dbstateLabel.textContent = 'no se pudo conectar (revisa la configuración)';
-        el.dbstate.classList.add('offline');
       });
     }catch(e){
       el.dbstateLabel.textContent = 'error de configuración de Firebase';
@@ -434,20 +464,81 @@
     }
   }
 
+  /* ---- pantalla de acceso ---- */
+  var loginEl = document.getElementById('loginOverlay');
+  function showLogin(msg){
+    loginEl.classList.add('open');
+    document.getElementById('loginMsg').textContent = msg || '';
+    el.userBox.style.display = 'none';
+    el.dbstateLabel.textContent = 'sin sesión';
+    el.dbstate.classList.add('offline');
+  }
+  function showApp(user){
+    loginEl.classList.remove('open');
+    document.getElementById('loginPass').value = '';
+    el.userEmail.textContent = user.email;
+    el.userBox.style.display = '';
+    el.dbstateLabel.textContent = 'conectando…';
+  }
+  function loginError(err){
+    var c = err && err.code || '';
+    if(c==='auth/invalid-credential' || c==='auth/wrong-password' || c==='auth/user-not-found' || c==='auth/invalid-login-credentials') return 'Correo o contraseña incorrectos.';
+    if(c==='auth/invalid-email') return 'El correo no es válido.';
+    if(c==='auth/too-many-requests') return 'Demasiados intentos. Espera unos minutos o restablece la contraseña.';
+    if(c==='auth/network-request-failed') return 'Sin conexión a internet.';
+    if(c==='auth/operation-not-allowed') return 'El acceso con correo y contraseña no está habilitado en Firebase.';
+    return 'No se pudo iniciar sesión.';
+  }
+  document.getElementById('loginForm').addEventListener('submit', function(ev){
+    ev.preventDefault();
+    if(!auth) return;
+    var email = document.getElementById('loginEmail').value.trim().toLowerCase();
+    var pass = document.getElementById('loginPass').value;
+    var msg = document.getElementById('loginMsg');
+    if(!email || !pass){ msg.textContent = 'Escribe tu correo y contraseña.'; return; }
+    msg.textContent = 'Entrando…';
+    auth.signInWithEmailAndPassword(email, pass).catch(function(err){ msg.textContent = loginError(err); });
+  });
+  document.getElementById('loginReset').addEventListener('click', function(){
+    var email = document.getElementById('loginEmail').value.trim().toLowerCase();
+    var msg = document.getElementById('loginMsg');
+    if(!email){ msg.textContent = 'Escribe tu correo arriba y vuelve a pulsar "Olvidé mi contraseña".'; return; }
+    auth.sendPasswordResetEmail(email).then(function(){ msg.textContent = 'Si ese correo tiene acceso, te llegó un enlace para crear una contraseña nueva.'; })
+      .catch(function(err){ msg.textContent = loginError(err); });
+  });
+  document.getElementById('btnSalir').addEventListener('click', function(){ if(auth) auth.signOut(); });
+
+  function stopData(){
+    if(unsubNegocios){ unsubNegocios(); unsubNegocios = null; }
+    if(unsubRutas){ unsubRutas(); unsubRutas = null; }
+    state.negocios = []; state.rutas = [];
+    render();
+  }
+
   function subscribeData(){
     if(unsubNegocios) unsubNegocios();
     if(unsubRutas) unsubRutas();
-    unsubNegocios = negociosCol.onSnapshot(function(snap){
-      state.negocios = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
-      render();
-    }, function(){
+    function onErr(err){
+      if(err && err.code==='permission-denied'){
+        if(!auth || !auth.currentUser) return; // ya se está cerrando la sesión
+        var quien = auth.currentUser.email;
+        pendingLoginMsg = 'El correo '+quien+' no tiene acceso a este mapa. Pide a Edgar que lo autorice.';
+        auth.signOut();
+        return;
+      }
       el.dbstateLabel.textContent = 'se perdió la conexión — reintentando…';
       el.dbstate.classList.add('offline');
-    });
+    }
+    unsubNegocios = negociosCol.onSnapshot(function(snap){
+      state.negocios = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
+      el.dbstateLabel.textContent = 'sincronizado con todos';
+      el.dbstate.classList.remove('offline');
+      render();
+    }, onErr);
     unsubRutas = rutasCol.onSnapshot(function(snap){
       state.rutas = snap.docs.map(function(d){ return Object.assign({id:d.id}, d.data()); });
       render();
-    });
+    }, onErr);
   }
 
   function createNegocio(data){ negociosCol.add(data).then(function(){ showToast('Negocio agregado'); }).catch(function(){ showToast('No se pudo guardar — revisa tu conexión'); }); }
